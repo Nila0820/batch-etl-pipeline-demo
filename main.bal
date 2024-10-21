@@ -3,6 +3,7 @@ import ballerina/sql;
 import ballerina/time;
 import ballerinax/h2.driver as _;
 import ballerinax/java.jdbc;
+import ballerina/io;
 
 final jdbc:Client dbClient = check new (url = "jdbc:h2:file:./database/loandatabase", user = "test", password = "test");
 
@@ -17,11 +18,11 @@ function extract() returns [LoanRequest[], LoanApproval[]]|error {
     log:printInfo("BEGIN: extract data from the sftp server");
     // Hint: Use io ballerina library and read the csv files
 
-    string loanRequestFile = "loan_request_2024_03_22.csv";
-    LoanRequest[] loanRequests;
+    string loanRequestFile = "./resources/loan_request_2024_03_22.csv";
+    LoanRequest[] loanRequests = check io:fileReadCsv(loanRequestFile);
 
-    string loanApprovalsFile = "approved_loans_2024_03_22.csv";    
-    LoanApproval[] loanApprovals;
+    string loanApprovalsFile = "./resources/approved_loans_2024_03_22.csv";    
+    LoanApproval[] loanApprovals = check io:fileReadCsv(loanApprovalsFile);
 
     log:printInfo("END: extract data from the sftp server");
     return [loanRequests, loanApprovals];
@@ -31,11 +32,13 @@ function transform(LoanRequest[] loanRequests, LoanApproval[] loanApprovals)
     returns [Loan[], BranchPerformance[], RegionPerformance[]] {
     log:printInfo("START: transform data");
 
-    // Get the unique approved loan requests by joining two csv files
-    // Create an array of Loan records
-    // Hint: User ballerina integrated queries and transformLoanRequest function
-    Loan[] approvedLoans;
+    // Perform an inner join between LoanRequest and LoanApproval
+    Loan[] approvedLoans = from var request in loanRequests
+                           join var approval in loanApprovals
+                           on request.loanRequestId equals approval.loanRequestId
+                           select transformLoanRequest(request, approval);
 
+    // Calculate BranchPerformance
     BranchPerformance[] branchPerformance = from var {branch, loanType, grantedAmount, interest}
         in approvedLoans
         group by branch, loanType
@@ -48,9 +51,19 @@ function transform(LoanRequest[] loanRequests, LoanApproval[] loanApprovals)
             date: todayString()
         };
 
-    // Group the `approvedLoans` by region, loanType, date, dayOfWeek
-    // Hint: User ballerina integrated queries and use `sum` function when needed
-    RegionPerformance[] regionPerformance;
+    // Calculate RegionPerformance
+    RegionPerformance[] regionPerformance = from var {region, loanType, grantedAmount, interest, date, dayOfWeek}
+        in approvedLoans
+        group by region, loanType, date, dayOfWeek
+        select {
+            id: generateId(),
+            region,
+            loanType,
+            totalGrants: sum(grantedAmount),
+            totalInterest: sum(interest),
+            date,
+            dayOfWeek
+        };
 
     log:printInfo("END: transform data");
     return [approvedLoans, branchPerformance, regionPerformance];
@@ -62,25 +75,25 @@ function transformLoanRequest(LoanRequest loanRequest, LoanApproval loanApproval
     var {loanRequestId, amount, loanType, datetime, period, branch, status} = loanRequest;
     var {grantedAmount, interest, period: approvedPeriod} = loanApproval;
 
-    // date time related operations
+    // Date time related operations
     time:Date date = fromUtcStringToDate(datetime, USA_UTC_OFFSET_IN_SECONDS);
     string dateString = fromDateToString(date);
     DayOfWeek dayOfWeek = getDayOfWeek(date);
 
-    // Hint: Categorize branch by region
-    string region;
+    // Categorize branch by region
+    string region = getRegion(branch);
 
-    // Hint: Catergorization of loans by amount and type
-    LoanCatergotyByAmount loanCatergoryByAmount;
+    // Categorization of loans by amount and type
+    LoanCatergotyByAmount loanCatergoryByAmount = getLoanCategoryByAmount(amount, loanType);
 
-    // Hint: Calculate total interest
-    decimal totalInterest;
+    // Calculate total interest
+    decimal totalInterest = interest;
 
-    // Hint: Get the loan status
-    LoanStatus loanStatus;
+    // Get the loan status
+    LoanStatus loanStatus = getLoanStatus(status);
 
-    // Hint: Get the loan type
-    LoanType 'type;
+    // Get the loan type
+    LoanType 'type = getLoanType(loanType);
 
     log:printInfo(string `END: transform loan request: ${loanRequest.loanRequestId}`);
     return {
